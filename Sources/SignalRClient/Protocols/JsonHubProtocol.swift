@@ -1,6 +1,6 @@
 import Foundation
 
-class JsonHubProtocol: IHubProtocol {
+class JsonHubProtocol: HubProtocol {
     let name = "json"
     let version = 2
     let transferFormat: TransferFormat = .text
@@ -26,8 +26,41 @@ class JsonHubProtocol: IHubProtocol {
             guard let data = message.data(using: .utf8) else {
                 throw NSError(domain: "JsonHubProtocol", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid message encoding."])
             }
-            let parsedMessage = try JSONDecoder().decode(HubMessage.self, from: data)
-            hubMessages.append(parsedMessage)
+            if let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let type = jsonObject["type"] as? Int {
+                    switch type {
+                        case 1:
+                            let result = try JSONDecoder().decode(InvocationMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 2:
+                            let result = try JSONDecoder().decode(StreamItemMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 3:
+                            let result = try JSONDecoder().decode(CompletionMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 4:
+                            let result = try JSONDecoder().decode(StreamInvocationMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 5:
+                            let result = try JSONDecoder().decode(CancelInvocationMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 6:
+                            let result = try JSONDecoder().decode(PingMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 7:
+                            let result = try JSONDecoder().decode(CloseMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 8:
+                            let result = try JSONDecoder().decode(AckMessage.self, from: data)
+                            hubMessages.append(result)
+                        case 9:
+                            let result = try JSONDecoder().decode(SequenceMessage.self, from: data)
+                            hubMessages.append(result)
+                        default:
+                            // Unknown message type
+                            break
+                    }
+                }
         }
 
         return hubMessages

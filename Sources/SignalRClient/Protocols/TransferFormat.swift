@@ -31,13 +31,13 @@ protocol ITransport {
 
     /// Sends data over the transport.
     /// - Parameter data: The data to send.
-    func send(data: Data) async throws
+    func send(_ data: String) async throws
 
     /// Stops the transport.
     func stop() async throws
 
     /// A closure that is called when data is received.
-    var onReceive: ((Data) -> Void)? { get set }
+    var onReceive: ((String) -> Void)? { get set }
 
     /// A closure that is called when the transport is closed.
     var onClose: ((Error?) -> Void)? { get set }

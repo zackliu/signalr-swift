@@ -1,6 +1,6 @@
 import Foundation
 
-protocol IHubProtocol {
+protocol HubProtocol {
     /// The name of the protocol. This is used by SignalR to resolve the protocol between the client and server.
     var name: String { get }
     /// The version of the protocol.
