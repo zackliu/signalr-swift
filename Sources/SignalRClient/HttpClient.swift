@@ -103,8 +103,8 @@ class DefaultHttpClient: HttpClient {
 
 class AccessTokenHttpClient: HttpClient {
     var accessTokenFactory: (() async throws -> String?)?
+    var accessToken: String?
     private let innerClient: HttpClient
-    private var accessToken: String?
     
     
     public init(innerClient: HttpClient, accessTokenFactory: (() async throws -> String?)?) {

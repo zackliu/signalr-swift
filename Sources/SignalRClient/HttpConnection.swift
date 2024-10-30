@@ -1,5 +1,6 @@
 import Foundation
 import FoundationNetworking
+import zlib
 
 // MARK: - Enums and Protocols
 
@@ -202,6 +203,8 @@ class HttpConnection: IConnection {
 
     private func startInternal(transferFormat: TransferFormat) async throws {
         var url = baseUrl
+        accessTokenFactory = options.accessTokenFactory
+        httpClient.accessTokenFactory = accessTokenFactory
 
         do {
             if options.skipNegotiation {
@@ -226,7 +229,10 @@ class HttpConnection: IConnection {
                         url = negotiateResponse?.url ?? url
                     }
                     if let accessToken = negotiateResponse?.accessToken {
+                        // Replace the current access token factory with one that uses
+                        // the returned access token
                         accessTokenFactory = { return accessToken }
+                        httpClient.accessTokenFactory = accessTokenFactory
                         httpClient.accessTokenFactory = nil
                     }
                     redirects += 1
@@ -300,7 +306,7 @@ class HttpConnection: IConnection {
             if response.statusCode != 200 {
                 throw NSError(domain: "Unexpected status code returned from negotiate '\(response.statusCode)'", code: 0)
             }
-            
+
             let decoder = JSONDecoder()
             var negotiateResponse = try decoder.decode(NegotiateResponse.self, from: data)
 
@@ -325,13 +331,8 @@ class HttpConnection: IConnection {
 
     private func createTransport(url: String, requestedTransport: HttpTransportType?, negotiateResponse: NegotiateResponse?, requestedTransferFormat: TransferFormat) async throws {
         var connectUrl = createConnectUrl(url: url, connectionToken: negotiateResponse?.connectionToken)
-        if let transportInstance = options.transportInstance {
-            logger.log(level: .debug, message: "Connection was provided an instance of ITransport, using that directly.")
-            transport = transportInstance
-            try await startTransport(url: connectUrl, transferFormat: requestedTransferFormat)
-            connectionId = negotiateResponse?.connectionId
-            return
-        }
+
+        // TODO: Create websocket directly, add other protocols later
 
         var transportExceptions: [Error] = []
         let transports = negotiateResponse?.availableTransports ?? []
@@ -490,9 +491,6 @@ class HttpConnection: IConnection {
     private func constructTransport(transport: HttpTransportType) throws -> ITransport {
         switch transport {
             case .webSockets:
-                guard options.webSocket != nil else {
-                    throw NSError(domain: "'WebSocket' is not supported in your environment.", code: 0)
-                }
                 return WebSocketTransport(
                     httpClient: httpClient,
                     accessTokenFactory: accessTokenFactory,
@@ -502,30 +500,22 @@ class HttpConnection: IConnection {
                     headers: options.headers ?? [:]
                 )
             case .serverSentEvents:
-                guard options.eventSource != nil else {
-                    throw NSError(domain: "'EventSource' is not supported in your environment.", code: 0)
-                }
-                return ServerSentEventsTransport(
-                    httpClient: httpClient,
-                    accessToken: httpClient.accessTokenFactory,
-                    logger: logger,
-                    options: options
-                )
+                throw NSError(domain: "HttpConnection", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server-Sent Events transport is not supported."])
             case .longPolling:
-                return LongPollingTransport(httpClient: httpClient, logger: logger, options: options)
+                throw NSError(domain: "HttpConnection", code: 0, userInfo: [NSLocalizedDescriptionKey: "Long polling transport is not supported."])
             default:
-                throw NSError(domain: "Unknown transport: \(transport).", code: 0)
+                throw NSError(domain: "HttpConnection", code:0, userInfo:  [NSLocalizedDescriptionKey: "Unknown transport: \(transport)."])
         }
     }
 
     private func resolveTransportOrError(endpoint: AvailableTransport, requestedTransport: HttpTransportType?, requestedTransferFormat: TransferFormat, useStatefulReconnect: Bool) -> Any {
-        guard let transportType = HttpTransportType(rawValue: endpoint.transport.lowercased()) else {
+        guard let transportType = HttpTransportType.from(endpoint.transport) else {
             logger.log(level: .debug, message: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.")
             return NSError(domain: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.", code: 0)
         }
 
         if transportMatches(requestedTransport: requestedTransport, actualTransport: transportType) {
-            let transferFormats = endpoint.transferFormats.compactMap { TransferFormat(rawValue: $0.lowercased()) }
+            let transferFormats = endpoint.transferFormats.compactMap { TransferFormat($0) }
             if transferFormats.contains(requestedTransferFormat) {
                 do {
                     features["reconnect"] = (transportType == .webSockets && useStatefulReconnect) ? true : nil
@@ -545,8 +535,8 @@ class HttpConnection: IConnection {
     }
 
     private func transportMatches(requestedTransport: HttpTransportType?, actualTransport: HttpTransportType) -> Bool {
-        guard let requestedTransport = requestedTransport else { return true }
-        return actualTransport.contains(requestedTransport)
+        guard let requestedTransport = requestedTransport else { return true } // Allow any the transport if options is not set
+        return requestedTransport.contains(actualTransport)
     }
 
     private func getUserAgentHeader() -> (String, String) {
@@ -636,68 +626,6 @@ class DefaultLogger: ILogger {
     }
 }
 
-class WebSocketTransport: ITransport {
-    var onReceive: ((String) -> Void)?
-    var onClose: ((Error?) -> Void)?
-
-    init(httpClient: HttpClient, accessTokenFactory: (() async throws -> String?)?, logger: ILogger, logMessageContent: Bool, webSocket: AnyObject?, headers: [String: String]) {
-        // Implement initialization
-    }
-
-    func connect(url: String, transferFormat: TransferFormat) async throws {
-        // Implement WebSocket connection logic
-    }
-
-    func send(_ data: String) async throws {
-        // Implement data sending over WebSocket
-    }
-
-    func stop() async throws {
-        // Implement stopping the WebSocket
-    }
-}
-
-class ServerSentEventsTransport: ITransport {
-    var onReceive: ((String) -> Void)?
-    var onClose: ((Error?) -> Void)?
-
-    init(httpClient: HttpClient, accessToken: (() async throws -> String?)?, logger: ILogger, options: IHttpConnectionOptions) {
-        // Implement initialization
-    }
-
-    func connect(url: String, transferFormat: TransferFormat) async throws {
-        // Implement SSE connection logic
-    }
-
-    func send(_ data: String) async throws {
-        // Implement data sending over SSE
-    }
-
-    func stop() async throws {
-        // Implement stopping the SSE connection
-    }
-}
-
-class LongPollingTransport: ITransport {
-    var onReceive: ((String) -> Void)?
-    var onClose: ((Error?) -> Void)?
-
-    init(httpClient: HttpClient, logger: ILogger, options: IHttpConnectionOptions) {
-        // Implement initialization
-    }
-
-    func connect(url: String, transferFormat: TransferFormat) async throws {
-        // Implement long polling connection logic
-    }
-
-    func send(_ data: String) async throws {
-        // Implement data sending over long polling
-    }
-
-    func stop() async throws {
-        // Implement stopping the long polling
-    }
-}
 
 // MARK: - Notes on Translation
 
