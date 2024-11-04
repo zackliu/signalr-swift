@@ -1,6 +1,5 @@
 import Foundation
 import FoundationNetworking
-import zlib
 
 // MARK: - Enums and Protocols
 

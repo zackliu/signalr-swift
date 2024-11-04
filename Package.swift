@@ -7,25 +7,17 @@ let package = Package(
         .library(name: "SignalRClient", targets: ["SignalRClient"]),
     ],
     dependencies: [
-        // .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
-        // .package(url: "https://github.com/daltoniam/Starscream.git", exact: "4.0.6"),
-        // .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.0.0"),
+        .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.15.0"),
+        // .package(url: "https://github.com/Zewo/zlib.git", )
         // Add other dependencies here
     ],
     targets: [
-        // .target(
-        //     name: "CNIOExtrasZlib",
-        //     dependencies: [],
-        //     linkerSettings: [
-        //         .linkedLibrary("z")
-        //     ]
-        // ),
         .target(
             name: "SignalRClient",
-            dependencies: [ ],
-            linkerSettings: [
-                .linkedLibrary("z")
-            ]),
-        .testTarget(name: "SignalRClientTests", dependencies: ["SignalRClient"]),
+            dependencies: [
+                .product(name: "WebSocketKit", package: "websocket-kit")
+            ]
+        ),
+        // .testTarget(name: "SignalRClientTests", dependencies: ["SignalRClient"]),
     ]
 )

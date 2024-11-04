@@ -1,123 +1,191 @@
 import Foundation
-import Starscream
+import WebSocketKit
+import NIO
 
-// MARK: - WebSocketTransport
-
-class WebSocketTransport: NSObject, ITransport, WebSocketDelegate {
+final class WebSocketTransport: ITransport {
     private let logger: ILogger
-    private let accessTokenFactory: (() -> String)?
+    private let accessTokenFactory: (() throws -> String)?
     private let logMessageContent: Bool
-    private var webSocket: WebSocket?
     private let httpClient: HttpClient
     private let headers: [String: String]
-    private var connectContinuation: CheckedContinuation<Void, Error>?
+    private var websocket: WebSocket?
+    private let eventLoopGroup: EventLoopGroup
+    private var transferFormat: TransferFormat = .text
 
-    var onReceive: ((Data) -> Void)?
+    var onReceive: ((StringOrData) -> Void)?
     var onClose: ((Error?) -> Void)?
 
     init(httpClient: HttpClient,
-         accessTokenFactory: (() -> String)?,
+         accessTokenFactory: (() throws -> String)?,
          logger: ILogger,
          logMessageContent: Bool,
-         headers: [String: String]) {
+         headers: [String: String],
+         eventLoopGroup: EventLoopGroup? = nil) {
         self.httpClient = httpClient
         self.accessTokenFactory = accessTokenFactory
         self.logger = logger
         self.logMessageContent = logMessageContent
         self.headers = headers
+        self.eventLoopGroup = eventLoopGroup ?? MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
-    func connect(url: URL, transferFormat: TransferFormat) async throws {
-        self.logger.log(.trace, message: "(WebSockets transport) Connecting.")
+    func connect(url: String, transferFormat: TransferFormat) async throws {
+        self.logger.log(level: .debug, message: "(WebSockets transport) Connecting.")
 
-        var urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        if urlComponents?.scheme == "http" {
-            urlComponents?.scheme = "ws"
-        } else if urlComponents?.scheme == "https" {
-            urlComponents?.scheme = "wss"
+        self.transferFormat = transferFormat
+
+        var urlComponents = URLComponents(url: URL(string: url)!, resolvingAgainstBaseURL: false)!
+
+        if urlComponents.scheme == "http" {
+            urlComponents.scheme = "ws"
+        } else if urlComponents.scheme == "https" {
+            urlComponents.scheme = "wss"
         }
 
-        guard let wsUrl = urlComponents?.url else {
+        // Prepare headers
+        var requestHeaders = HTTPHeaders()
+        // Add custom headers
+        for (name, value) in self.headers {
+            requestHeaders.add(name: name, value: value)
+        }
+
+        // Add Authorization header if token is available
+        if let token = try self.accessTokenFactory?() {
+            requestHeaders.add(name: "Authorization", value: "Bearer \(token)")
+        }
+
+        guard let wsUrl = urlComponents.url else {
             throw URLError(.badURL)
         }
 
-        var request = URLRequest(url: wsUrl)
+        let accessQueue = DispatchQueue(label: "com.customWebSocketClient.queue")
 
-        if let token = self.accessTokenFactory?() {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let client = WebSocketClient(eventLoopGroupProvider: .shared(eventLoopGroup))
+        client.connect(scheme: urlComponents.scheme!, host: urlComponents.host!, port: urlComponents.port!, path: urlComponents.path, query: urlComponents.query, headers: requestHeaders) { [weak self] ws in
+            // self?.websocket = ws
+            accessQueue.async {
+                ws.onText { [weak self] _, text in
+                    self?.onReceive?(.string(text))
+                }
+
+                ws.onBinary { [weak self] _, buffer in
+                    if let data = buffer.getData(at: 0, length: buffer.readableBytes) {
+                        self?.onReceive?(.data(data))
+                    }
+                }
+            }
+            
+        }.whenFailure { error in
+            print("Failed to connect: \(error)")
+            // mark close
         }
 
-        for (header, value) in self.headers {
-            request.setValue(value, forHTTPHeaderField: header)
-        }
+        let promise = self.eventLoopGroup.next().makePromise(of: Void.self)
 
-        self.webSocket = WebSocket(request: request)
-        self.webSocket?.delegate = self
-        self.webSocket?.connect()
+        WebSocket.connect(to: wsUrl.absoluteString, headers: requestHeaders, on: self.eventLoopGroup) { [weak self] ws in
+            guard let self = self else { return }
+            self.websocket = ws
+            self.logger.log(.information, message: "WebSocket connected to \(wsUrl).")
+
+            // Set up receive handlers
+            ws.onText { [weak self] ws, text in
+                guard let self = self else { return }
+                self.logger.log(.trace, message: "(WebSockets transport) received text.")
+                if self.logMessageContent {
+                    self.logger.log(.trace, message: "Received text: \(text)")
+                }
+                var buffer = ws.channel.allocator.buffer(capacity: text.utf8.count)
+                buffer.writeString(text)
+                self.onReceive?(buffer)
+            }
+
+            ws.onBinary { [weak self] ws, data in
+                guard let self = self else { return }
+                self.logger.log(.trace, message: "(WebSockets transport) received binary data.")
+                if self.logMessageContent {
+                    self.logger.log(.trace, message: "Received data: \(data.readableBytes) bytes.")
+                }
+                self.onReceive?(data)
+            }
+
+            ws.onClose.whenComplete { [weak self] result in
+                guard let self = self else { return }
+                self.logger.log(.trace, message: "(WebSockets transport) socket closed.")
+                switch result {
+                case .success:
+                    self.onClose?(nil)
+                case .failure(let error):
+                    self.onClose?(error)
+                }
+            }
+
+            promise.succeed(())
+        }.whenFailure { [weak self] error in
+            self?.logger.log(.error, message: "WebSocket connection failed: \(error)")
+            self?.onClose?(error)
+            promise.fail(error)
+        }
 
         // Wait for the connection to be established
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            self.connectContinuation = continuation
+        try promise.futureResult.wait()
+        
+    }
+
+    private func receiveMessagesLoop() async {
+        guard let webSocketTask = self.webSocketTask, !self.isStopped else {
+            return
+        }
+
+        while !self.isStopped {
+            do {
+                let result = try await webSocketTask.receive()
+                switch result {
+                case .string(let text):
+                    if self.logMessageContent {
+                        self.logger.log(level: .debug, message: "Received text: \(text)")
+                    }
+                    self.onReceive?(.string(text))
+                case .data(let data):
+                    if self.logMessageContent {
+                        self.logger.log(level: .debug , message: "Received data: \(data)")
+                    }
+                    self.onReceive?(.data(data))
+                @unknown default:
+                    self.logger.log(level: .error, message: "Received unknown message type")
+                }
+            } catch {
+                self.logger.log(level: .error, message: "WebSocket receive error: \(error)")
+                self.onClose?(error)
+                break
+            }
         }
     }
 
-    func send(data: Data) async throws {
-        guard let webSocket = self.webSocket, webSocket.isConnected else {
+    func send(_ data: StringOrData) async throws {
+        guard let webSocketTask = self.webSocketTask else {
             throw NSError(domain: "WebSocketTransport",
                           code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "WebSocket is not in the OPEN state"])
         }
 
-        self.logger.log(.trace, message: "(WebSockets transport) sending data. \(data).")
+        let message: URLSessionWebSocketTask.Message
+        switch data {
+            case .string(let str):
+                message = .string(str)
+            case .data(let da):
+                message = .data(da)
+        }
 
-        webSocket.write(data: data)
+        self.logger.log(level: .debug, message: "(WebSockets transport) sending data.")
+
+        try await webSocketTask.send(message)
     }
 
     func stop() async {
-        if let webSocket = self.webSocket {
-            webSocket.disconnect()
-            self.webSocket = nil
-            self.logger.log(.trace, message: "(WebSockets transport) socket closed.")
-            self.onClose?(nil)
-        }
-    }
-
-    private func close(error: Error?) {
-        if let webSocket = self.webSocket {
-            webSocket.disconnect()
-            self.webSocket = nil
-            self.logger.log(.trace, message: "(WebSockets transport) socket closed.")
-            self.onClose?(error)
-        }
-    }
-
-    // MARK: - WebSocketDelegate methods
-
-    func websocketDidConnect(socket: WebSocketClient) {
-        self.logger.log(.information, message: "WebSocket connected to \(socket.currentURL).")
-        self.connectContinuation?.resume()
-        self.connectContinuation = nil
-    }
-
-    func websocketDidDisconnect(socket: WebSocketClient, error: Error?) {
-        self.logger.log(.information, message: "WebSocket disconnected.")
-        if let continuation = self.connectContinuation {
-            continuation.resume(throwing: error ?? NSError(domain: "WebSocketTransport",
-                                                           code: -1,
-                                                           userInfo: [NSLocalizedDescriptionKey: "WebSocket disconnected before connection established."]))
-            self.connectContinuation = nil
-        } else {
-            self.close(error: error)
-        }
-    }
-
-    func websocketDidReceiveMessage(socket: WebSocketClient, text: String) {
-        self.logger.log(.trace, message: "(WebSockets transport) data received. \(text).")
-        self.onReceive?(Data(text.utf8))
-    }
-
-    func websocketDidReceiveData(socket: WebSocketClient, data: Data) {
-        self.logger.log(.trace, message: "(WebSockets transport) data received. \(data.count) bytes.")
-        self.onReceive?(data)
+        self.isStopped = true
+        self.webSocketTask?.cancel(with: .goingAway, reason: nil)
+        self.webSocketTask = nil
+        self.logger.log(level: .debug, message: "(WebSockets transport) socket closed.")
+        self.onClose?(nil)
     }
 }
