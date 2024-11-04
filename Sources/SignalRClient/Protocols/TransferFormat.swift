@@ -59,8 +59,12 @@ protocol ITransport {
     func stop() async throws
 
     /// A closure that is called when data is received.
-    var onReceive: ((StringOrData) -> Void)? { get set }
+    var onReceive: OnReceiveHandler? { get set }
 
     /// A closure that is called when the transport is closed.
-    var onClose: ((Error?) -> Void)? { get set }
+    var onClose: OnCloseHander? { get set }
+
+    typealias OnReceiveHandler = @Sendable (StringOrData) -> Void
+
+    typealias OnCloseHander = @Sendable (Error?) -> Void
 }

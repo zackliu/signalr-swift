@@ -1,32 +1,36 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
+import WebSocketKit
+import NIO
 
-
-final class WebSocketTransport: ITransport, URLSessionWebSocketDelegate, @unchecked Sendable {
+final class WebSocketTransport2: ITransport, @unchecked Sendable {
     private let logger: Logger
-    private let accessTokenFactory: @Sendable() throws -> String?
+    private let accessTokenFactory: (() throws -> String)?
     private let logMessageContent: Bool
+    private let httpClient: HttpClient
     private let headers: [String: String]
+    private var websocket: WebSocket?
+    private let eventLoopGroup: EventLoopGroup
     private var transferFormat: TransferFormat = .text
 
     var onReceive: OnReceiveHandler?
     var onClose: OnCloseHander?
 
     init(httpClient: HttpClient,
-         accessTokenFactory: @escaping @Sendable () throws -> String?,
-         logger: Logger,
+         accessTokenFactory: (() throws -> String)?,
+         logger: ILogger,
          logMessageContent: Bool,
-         headers: [String: String]) {
+         headers: [String: String],
+         eventLoopGroup: EventLoopGroup? = nil) {
+        self.httpClient = httpClient
         self.accessTokenFactory = accessTokenFactory
         self.logger = logger
         self.logMessageContent = logMessageContent
         self.headers = headers
+        self.eventLoopGroup = eventLoopGroup ?? MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
     func connect(url: String, transferFormat: TransferFormat) async throws {
-        await self.logger.log(level: .debug, message: "(WebSockets transport) Connecting.")
+        self.logger.log(level: .debug, message: "(WebSockets transport) Connecting.")
 
         self.transferFormat = transferFormat
 
@@ -37,12 +41,6 @@ final class WebSocketTransport: ITransport, URLSessionWebSocketDelegate, @unchec
         } else if urlComponents.scheme == "https" {
             urlComponents.scheme = "wss"
         }
-
-        let session = URLSession.shared
-        var request = URLRequest(url: urlComponents.url!)
-        let websocketTask = session.webSocketTask(with: request)
-
-        websocketTask.resume()
 
         // Prepare headers
         var requestHeaders = HTTPHeaders()

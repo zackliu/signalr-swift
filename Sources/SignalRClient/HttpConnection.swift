@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
 import FoundationNetworking
+#endif
 
 // MARK: - Enums and Protocols
 
@@ -11,14 +13,14 @@ private enum ConnectionState: String {
 }
 
 protocol IConnection {
-    var onReceive: ((String) -> Void)? { get set }
-    var onClose: ((Error?) -> Void)? { get set }
+    var onReceive: ITransport.OnReceiveHandler? { get set }
+    var onClose: ITransport.OnCloseHander? { get set }
     func start(transferFormat: TransferFormat) async throws
     func send(_ data: String) async throws
     func stop(error: Error?) async
 }
 
-protocol ILogger {
+protocol Logger: Actor {
     func log(level: LogLevel, message: String)
 }
 
@@ -27,7 +29,7 @@ enum LogLevel {
 }
 
 struct IHttpConnectionOptions {
-    var logger: ILogger?
+    var logger: Logger?
     var accessTokenFactory: (() async throws -> String?)?
     var httpClient: HttpClient?
     var transport: HttpTransportType?
@@ -98,7 +100,7 @@ class HttpConnection: IConnection {
     private var connectionState: ConnectionState = .disconnected
     private var connectionStarted: Bool = false
     private let httpClient: AccessTokenHttpClient
-    private let logger: ILogger
+    private let logger: Logger
     private var options: IHttpConnectionOptions
     private var transport: ITransport?
     private var startInternalTask: Task<Void, Error>?
@@ -109,8 +111,8 @@ class HttpConnection: IConnection {
     public var features: [String: Any] = [:]
     public var baseUrl: String
     public var connectionId: String?
-    public var onReceive: ((String) -> Void)?
-    public var onClose: ((Error?) -> Void)?
+    public var onReceive: ITransport.OnReceiveHandler?
+    public var onClose: ITransport.OnCloseHander?
     private let negotiateVersion = 1
 
     // MARK: - Initialization
@@ -244,9 +246,9 @@ class HttpConnection: IConnection {
                 try await createTransport(url: url, requestedTransport: options.transport, negotiateResponse: negotiateResponse, requestedTransferFormat: transferFormat)
             }
 
-            if transport is LongPollingTransport {
-                features["inherentKeepAlive"] = true
-            }
+            // if transport is LongPollingTransport {
+            //     features["inherentKeepAlive"] = true
+            // }
 
             if connectionState == .connecting {
                 logger.log(level: .debug, message: "The HttpConnection connected successfully.")
@@ -374,34 +376,38 @@ class HttpConnection: IConnection {
 
     private func startTransport(url: String, transferFormat: TransferFormat) async throws {
         transport?.onReceive = self.onReceive
-
-        if features["reconnect"] != nil {
-            transport?.onClose = { [weak self] error in
-                Task {
-                    guard let self = self else { return }
-                    var callStop = false
-                    if self.features["reconnect"] != nil {
-                        do {
-                            (self.features["disconnected"] as? () -> Void)?()
-                            try await self.transport?.connect(url: url, transferFormat: transferFormat)
-                            try await (self.features["resend"] as? () async throws -> Void)?()
-                        } catch {
-                            callStop = true
-                        }
-                    } else {
-                        self.stopConnection(error: error)
-                        return
-                    }
-                    if callStop {
-                        self.stopConnection(error: error)
-                    }
-                }
-            }
-        } else {
-            transport?.onClose = { [weak self] error in
-                self?.stopConnection(error: error)
-            }
+        transport?.onClose = { [weak self] error in
+            guard let self = self else { return }
+            self.stopConnection(error: error)
         }
+
+        // if features["reconnect"] != nil {
+        //     transport?.onClose = { [weak self] error in
+        //         Task {
+        //             guard let self = self else { return }
+        //             var callStop = false
+        //             if self.features["reconnect"] != nil {
+        //                 do {
+        //                     (self.features["disconnected"] as? () -> Void)?()
+        //                     try await self.transport?.connect(url: url, transferFormat: transferFormat)
+        //                     try await (self.features["resend"] as? () async throws -> Void)?()
+        //                 } catch {
+        //                     callStop = true
+        //                 }
+        //             } else {
+        //                 self.stopConnection(error: error)
+        //                 return
+        //             }
+        //             if callStop {
+        //                 self.stopConnection(error: error)
+        //             }
+        //         }
+        //     }
+        // } else {
+        //     transport?.onClose = { [weak self] error in
+        //         self?.stopConnection(error: error)
+        //     }
+        // }
 
         try await transport?.connect(url: url, transferFormat: transferFormat)
     }
@@ -619,7 +625,7 @@ class TransportSendQueue {
 
 // MARK: - Helper Classes and Enums
 
-class DefaultLogger: ILogger {
+class DefaultLogger: Logger {
     func log(level: LogLevel, message: String) {
         print("[\(level)] \(message)")
     }
