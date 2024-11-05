@@ -16,11 +16,11 @@ protocol IConnection {
     var onReceive: ITransport.OnReceiveHandler? { get set }
     var onClose: ITransport.OnCloseHander? { get set }
     func start(transferFormat: TransferFormat) async throws
-    func send(_ data: String) async throws
+    func send(_ data: StringOrData) async throws
     func stop(error: Error?) async
 }
 
-protocol Logger: Actor {
+protocol Logger: Sendable {
     func log(level: LogLevel, message: String)
 }
 
@@ -30,7 +30,7 @@ enum LogLevel {
 
 struct IHttpConnectionOptions {
     var logger: Logger?
-    var accessTokenFactory: (() async throws -> String?)?
+    var accessTokenFactory: (@Sendable () async throws -> String?)?
     var httpClient: HttpClient?
     var transport: HttpTransportType?
     var skipNegotiation: Bool
@@ -94,7 +94,7 @@ struct AvailableTransport: Decodable {
 
 // MARK: - HttpConnection Class
 
-class HttpConnection: IConnection {
+class HttpConnection: IConnection, @unchecked Sendable {
     // MARK: - Properties
 
     private var connectionState: ConnectionState = .disconnected
@@ -106,8 +106,7 @@ class HttpConnection: IConnection {
     private var startInternalTask: Task<Void, Error>?
     private var stopTask: Task<Void, Never>?
     private var stopError: Error?
-    private var accessTokenFactory: (() async throws -> String?)?
-    private var sendQueue: TransportSendQueue?
+    private var accessTokenFactory: (@Sendable () async throws -> String?)?
     public var features: [String: Any] = [:]
     public var baseUrl: String
     public var connectionId: String?
@@ -135,7 +134,7 @@ class HttpConnection: IConnection {
     // MARK: - Public Methods
 
     func start(transferFormat: TransferFormat = .binary) async throws {
-        logger.log(level: .debug, message: "Starting connection with transfer format '\(transferFormat)'.")
+        await logger.log(level: .debug, message: "Starting connection with transfer format '\(transferFormat)'.")
 
         guard connectionState == .disconnected else {
             throw NSError(domain: "HttpConnection", code: 0, userInfo: [NSLocalizedDescriptionKey: "Cannot start an HttpConnection that is not in the 'Disconnected' state."])
@@ -155,38 +154,34 @@ class HttpConnection: IConnection {
 
         if connectionState == .disconnecting {
             let message = "Failed to start the HttpConnection before stop() was called."
-            logger.log(level: .error, message: message)
+            await logger.log(level: .error, message: message)
             await stopTask?.value
             throw NSError(domain: message, code: 0)
         } else if connectionState != .connected {
             let message = "HttpConnection.startInternal completed gracefully but didn't enter the connection into the connected state!"
-            logger.log(level: .error, message: message)
+            await logger.log(level: .error, message: message)
             throw NSError(domain: message, code: 0)
         }
 
         connectionStarted = true
     }
 
-    func send(_ data: String) async throws {
+    func send(_ data: StringOrData) async throws {
         guard connectionState == .connected else {
             throw NSError(domain: "Cannot send data if the connection is not in the 'Connected' State.", code: 0)
         }
 
-        if sendQueue == nil {
-            sendQueue = TransportSendQueue(transport: transport!)
-        }
-
-        try await sendQueue?.send(data)
+        try await transport?.send(data)
     }
 
     func stop(error: Error? = nil) async {
         if connectionState == .disconnected {
-            logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnected state.")
+            await logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnected state.")
             return
         }
 
         if connectionState == .disconnecting {
-            logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnecting state.")
+            await logger.log(level: .debug, message: "Call to HttpConnection.stop(\(String(describing: error))) ignored because the connection is already in the disconnecting state.")
             await stopTask?.value
             return
         }
@@ -251,11 +246,11 @@ class HttpConnection: IConnection {
             // }
 
             if connectionState == .connecting {
-                logger.log(level: .debug, message: "The HttpConnection connected successfully.")
+                await logger.log(level: .debug, message: "The HttpConnection connected successfully.")
                 connectionState = .connected
             }
         } catch {
-            logger.log(level: .error, message: "Failed to start the connection: \(error)")
+            await logger.log(level: .error, message: "Failed to start the connection: \(error)")
             connectionState = .disconnected
             transport = nil
             throw error
@@ -275,12 +270,12 @@ class HttpConnection: IConnection {
             do {
                 try await transport?.stop()
             } catch {
-                logger.log(level: .error, message: "HttpConnection.transport.stop() threw error '\(error)'.")
-                stopConnection(error: error)
+                await logger.log(level: .error, message: "HttpConnection.transport.stop() threw error '\(error)'.")
+                await stopConnection(error: error)
             }
             transport = nil
         } else {
-            logger.log(level: .debug, message: "HttpConnection.transport is undefined in HttpConnection.stop() because start() failed.")
+            await logger.log(level: .debug, message: "HttpConnection.transport is undefined in HttpConnection.stop() because start() failed.")
         }
     }
 
@@ -290,7 +285,7 @@ class HttpConnection: IConnection {
         headers[name] = value
 
         let negotiateUrl = resolveNegotiateUrl(url: url)
-        logger.log(level: .debug, message: "Sending negotiation request: \(negotiateUrl).")
+        await logger.log(level: .debug, message: "Sending negotiation request: \(negotiateUrl).")
 
         do {
             var request = URLRequest(url: URL(string: negotiateUrl)!)
@@ -325,7 +320,7 @@ class HttpConnection: IConnection {
             if let httpError = error as? HttpError, httpError.statusCode == 404 {
                 errorMessage += " Either this is not a SignalR endpoint or there is a proxy blocking the connection."
             }
-            logger.log(level: .error, message: errorMessage)
+            await logger.log(level: .error, message: errorMessage)
             throw NSError(domain: errorMessage, code: 0)
         }
     }
@@ -340,7 +335,7 @@ class HttpConnection: IConnection {
         var negotiate = negotiateResponse
 
         for endpoint in transports {
-            let transportOrError = resolveTransportOrError(endpoint: endpoint, requestedTransport: requestedTransport, requestedTransferFormat: requestedTransferFormat, useStatefulReconnect: negotiate?.useStatefulReconnect ?? false)
+            let transportOrError = await resolveTransportOrError(endpoint: endpoint, requestedTransport: requestedTransport, requestedTransferFormat: requestedTransferFormat, useStatefulReconnect: negotiate?.useStatefulReconnect ?? false)
             if let error = transportOrError as? Error {
                 transportExceptions.append(error)
             } else if let transportInstance = transportOrError as? ITransport {
@@ -354,12 +349,12 @@ class HttpConnection: IConnection {
                     connectionId = negotiate?.connectionId
                     return
                 } catch {
-                    logger.log(level: .error, message: "Failed to start the transport '\(endpoint.transport)': \(error)")
+                    await logger.log(level: .error, message: "Failed to start the transport '\(endpoint.transport)': \(error)")
                     negotiate = nil
                     transportExceptions.append(error)
                     if connectionState != .connecting {
                         let message = "Failed to select transport before stop() was called."
-                        logger.log(level: .debug, message: message)
+                        await logger.log(level: .debug, message: message)
                         throw NSError(domain: message, code: 0)
                     }
                 }
@@ -378,7 +373,7 @@ class HttpConnection: IConnection {
         transport?.onReceive = self.onReceive
         transport?.onClose = { [weak self] error in
             guard let self = self else { return }
-            self.stopConnection(error: error)
+            await self.stopConnection(error: error)
         }
 
         // if features["reconnect"] != nil {
@@ -412,8 +407,8 @@ class HttpConnection: IConnection {
         try await transport?.connect(url: url, transferFormat: transferFormat)
     }
 
-    private func stopConnection(error: Error?) {
-        logger.log(level: .debug, message: "HttpConnection.stopConnection(\(String(describing: error))) called while in state \(connectionState).")
+    private func stopConnection(error: Error?) async {
+        await logger.log(level: .debug, message: "HttpConnection.stopConnection(\(String(describing: error))) called while in state \(connectionState).")
 
         transport = nil
 
@@ -421,12 +416,12 @@ class HttpConnection: IConnection {
         stopError = nil
 
         if connectionState == .disconnected {
-            logger.log(level: .debug, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is already in the disconnected state.")
+            await logger.log(level: .debug, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is already in the disconnected state.")
             return
         }
 
         if connectionState == .connecting {
-            logger.log(level: .warning, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is still in the connecting state.")
+            await logger.log(level: .warning, message: "Call to HttpConnection.stopConnection(\(String(describing: finalError))) was ignored because the connection is still in the connecting state.")
             return
         }
 
@@ -435,20 +430,9 @@ class HttpConnection: IConnection {
         }
 
         if let error = finalError {
-            logger.log(level: .error, message: "Connection disconnected with error '\(error)'.")
+            await logger.log(level: .error, message: "Connection disconnected with error '\(error)'.")
         } else {
-            logger.log(level: .information, message: "Connection disconnected.")
-        }
-
-        if let sendQueue = sendQueue {
-            Task {
-                do {
-                    try await sendQueue.stop()
-                } catch {
-                    logger.log(level: .error, message: "TransportSendQueue.stop() threw error '\(error)'.")
-                }
-            }
-            self.sendQueue = nil
+            await logger.log(level: .information, message: "Connection disconnected.")
         }
 
         connectionId = nil
@@ -456,7 +440,7 @@ class HttpConnection: IConnection {
 
         if connectionStarted {
             connectionStarted = false
-            onClose?(finalError)
+            await onClose?(finalError)
         }
     }
 
@@ -501,7 +485,6 @@ class HttpConnection: IConnection {
                     accessTokenFactory: accessTokenFactory,
                     logger: logger,
                     logMessageContent: options.logMessageContent ?? false,
-                    webSocket: options.webSocket,
                     headers: options.headers ?? [:]
                 )
             case .serverSentEvents:
@@ -513,9 +496,9 @@ class HttpConnection: IConnection {
         }
     }
 
-    private func resolveTransportOrError(endpoint: AvailableTransport, requestedTransport: HttpTransportType?, requestedTransferFormat: TransferFormat, useStatefulReconnect: Bool) -> Any {
+    private func resolveTransportOrError(endpoint: AvailableTransport, requestedTransport: HttpTransportType?, requestedTransferFormat: TransferFormat, useStatefulReconnect: Bool) async -> Any {
         guard let transportType = HttpTransportType.from(endpoint.transport) else {
-            logger.log(level: .debug, message: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.")
+            await logger.log(level: .debug, message: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.")
             return NSError(domain: "Skipping transport '\(endpoint.transport)' because it is not supported by this client.", code: 0)
         }
 
@@ -530,11 +513,11 @@ class HttpConnection: IConnection {
                     return error
                 }
             } else {
-                logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it does not support the requested transfer format '\(requestedTransferFormat)'.")
+                await logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it does not support the requested transfer format '\(requestedTransferFormat)'.")
                 return NSError(domain: "'\(transportType)' does not support \(requestedTransferFormat).", code: 0)
             }
         } else {
-            logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it was disabled by the client.")
+            await logger.log(level: .debug, message: "Skipping transport '\(transportType)' because it was disabled by the client.")
             return NSError(domain: "'\(transportType)' is disabled by the client.", code: 0)
         }
     }
@@ -565,67 +548,9 @@ class HttpConnection: IConnection {
     }
 }
 
-// MARK: - TransportSendQueue Class
-
-class TransportSendQueue {
-    private var buffer: [String] = []
-    private var sendBufferedData = AsyncStream<Void>.Continuation(nil)
-    private var executing = true
-    private var transportResult: Task<Void, Error>?
-    private let transport: ITransport
-
-    init(transport: ITransport) {
-        self.transport = transport
-        Task {
-            await self.sendLoop()
-        }
-    }
-
-    func send(_ data: String) async throws {
-        bufferData(data)
-        if transportResult == nil {
-            transportResult = Task { try await transport.send(data) }
-        }
-        try await transportResult?.value
-    }
-
-    func stop() async throws {
-        executing = false
-        sendBufferedData.finish()
-    }
-
-    private func bufferData(_ data: String) {
-        buffer.append(data)
-        sendBufferedData.yield()
-    }
-
-    private func sendLoop() async {
-        while true {
-            for await _ in AsyncStream<Void>(bufferingPolicy: .unbounded, body: { continuation in
-                self.sendBufferedData = continuation
-            }) {
-                if !executing {
-                    transportResult?.cancel()
-                    break
-                }
-
-                let data = buffer.joined()
-                buffer.removeAll()
-
-                do {
-                    try await transport.send(data)
-                    transportResult = nil
-                } catch {
-                    transportResult?.cancel()
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Helper Classes and Enums
 
-class DefaultLogger: Logger {
+class DefaultLogger: Logger, @unchecked Sendable {
     func log(level: LogLevel, message: String) {
         print("[\(level)] \(message)")
     }

@@ -4,18 +4,20 @@ import FoundationNetworking
 #endif
 
 
-final class WebSocketTransport: ITransport, URLSessionWebSocketDelegate, @unchecked Sendable {
+final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegate, @unchecked Sendable {
     private let logger: Logger
-    private let accessTokenFactory: @Sendable() throws -> String?
+    private let accessTokenFactory: (@Sendable() async throws -> String?)?
     private let logMessageContent: Bool
     private let headers: [String: String]
     private var transferFormat: TransferFormat = .text
+    private var websocket: URLSessionWebSocketTask?
+    private var urlSession: URLSession?
 
     var onReceive: OnReceiveHandler?
     var onClose: OnCloseHander?
 
     init(httpClient: HttpClient,
-         accessTokenFactory: @escaping @Sendable () throws -> String?,
+         accessTokenFactory: (@Sendable () async throws -> String?)?,
          logger: Logger,
          logMessageContent: Bool,
          headers: [String: String]) {
@@ -38,49 +40,16 @@ final class WebSocketTransport: ITransport, URLSessionWebSocketDelegate, @unchec
             urlComponents.scheme = "wss"
         }
 
-        let session = URLSession.shared
+        let urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: OperationQueue()) 
         var request = URLRequest(url: urlComponents.url!)
-        let websocketTask = session.webSocketTask(with: request)
+        let websocket = urlSession.webSocketTask(with: request)
 
-        websocketTask.resume()
+        websocket.resume()
 
-        // Prepare headers
-        var requestHeaders = HTTPHeaders()
-        // Add custom headers
-        for (name, value) in self.headers {
-            requestHeaders.add(name: name, value: value)
+        Task {
+            await receiveMessage()
         }
-
-        // Add Authorization header if token is available
-        if let token = try self.accessTokenFactory?() {
-            requestHeaders.add(name: "Authorization", value: "Bearer \(token)")
-        }
-
-        guard let wsUrl = urlComponents.url else {
-            throw URLError(.badURL)
-        }
-
-        let client = WebSocketClient(eventLoopGroupProvider: .shared(eventLoopGroup))
-        client.connect(scheme: urlComponents.scheme!, host: urlComponents.host!, port: urlComponents.port!, path: urlComponents.path, query: urlComponents.query, headers: requestHeaders) { [weak self] ws in
-            guard let self = self else {
-                return
-            }
-
-            self.websocket = ws
-
-            ws.onText {[weak self] _, text in
-                self?.onReceive?(.string(text))
-            }
-
-            ws.onBinary {[weak self] _, buffer in
-                if let data = buffer.getData(at: 0, length: buffer.readableBytes) {
-                   self?.onReceive?(.data(data))
-                }
-            }
-        }.whenFailure { error in
-            print("Failed to connect: \(error)")
-            // mark close
-        }
+        
     }
 
     func send(_ data: StringOrData) async throws {
@@ -92,9 +61,9 @@ final class WebSocketTransport: ITransport, URLSessionWebSocketDelegate, @unchec
 
         switch data {
             case .string(let str):
-                try await ws.send(str)
+                try await ws.send(URLSessionWebSocketTask.Message.string(str))
             case .data(let data):
-                try await ws.send(raw: data, opcode: .binary)
+                try await ws.send(URLSessionWebSocketTask.Message.data(data))
             default:
                 throw NSError(domain: "WebSocketTransport",
                               code: -1,
@@ -103,15 +72,40 @@ final class WebSocketTransport: ITransport, URLSessionWebSocketDelegate, @unchec
     }
 
     func stop() async throws {
-        defer {
-            websocket = nil
-        }
+        websocket?.cancel()
+        urlSession?.finishTasksAndInvalidate()
+        await onClose?(nil)
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        self.logger.log(level: .debug, message: "WebSocket closed.")
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        self.logger.log(level: .debug, message: "WebSocket opened.")
+    }
+
+    private func receiveMessage() async {
+        guard let websocket = websocket else { return }
+        
         do {
-            try await websocket?.close()
-            onClose?(nil)
+            while true {
+                let message = try await websocket.receive()
+
+                switch message {
+                    case .string(let text):
+                        await onReceive?(.string(text))
+                    case .data(let data):
+                        await onReceive?(.data(data))
+                }
+            }
         } catch {
-            self.logger.log(level: .error, message: "(WebSockets transport) Error closing socket: \(error)")
-            onClose?(error)
-        } 
+            print("Failed to receive message: \(error)")
+            // You might want to handle reconnection logic here if needed
+        }
+    }
+
+    public func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        completionHandler(.performDefaultHandling, nil)
     }
 }

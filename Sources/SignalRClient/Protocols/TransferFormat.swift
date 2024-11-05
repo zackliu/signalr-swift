@@ -64,7 +64,7 @@ protocol ITransport {
     /// A closure that is called when the transport is closed.
     var onClose: OnCloseHander? { get set }
 
-    typealias OnReceiveHandler = @Sendable (StringOrData) -> Void
+    typealias OnReceiveHandler = @Sendable (StringOrData) async -> Void
 
-    typealias OnCloseHander = @Sendable (Error?) -> Void
+    typealias OnCloseHander = @Sendable (Error?) async -> Void
 }
