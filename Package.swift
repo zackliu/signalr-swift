@@ -18,6 +18,6 @@ let package = Package(
                 .product(name: "WebSocketKit", package: "websocket-kit")
             ]
         ),
-        // .testTarget(name: "SignalRClientTests", dependencies: ["SignalRClient"]),
+        .testTarget(name: "SignalRClientTests", dependencies: ["SignalRClient"]),
     ]
 )
