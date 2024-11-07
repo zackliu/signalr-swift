@@ -13,15 +13,11 @@ private enum ConnectionState: String {
 }
 
 protocol IConnection {
-    var onReceive: ITransport.OnReceiveHandler? { get set }
-    var onClose: ITransport.OnCloseHander? { get set }
+    var onReceive: Transport.OnReceiveHandler? { get set }
+    var onClose: Transport.OnCloseHander? { get set }
     func start(transferFormat: TransferFormat) async throws
     func send(_ data: StringOrData) async throws
     func stop(error: Error?) async
-}
-
-protocol Logger: Sendable {
-    func log(level: LogLevel, message: String)
 }
 
 enum LogLevel {
@@ -102,7 +98,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
     private let httpClient: AccessTokenHttpClient
     private let logger: Logger
     private var options: IHttpConnectionOptions
-    private var transport: ITransport?
+    private var transport: Transport?
     private var startInternalTask: Task<Void, Error>?
     private var stopTask: Task<Void, Never>?
     private var stopError: Error?
@@ -110,8 +106,8 @@ class HttpConnection: IConnection, @unchecked Sendable {
     public var features: [String: Any] = [:]
     public var baseUrl: String
     public var connectionId: String?
-    public var onReceive: ITransport.OnReceiveHandler?
-    public var onClose: ITransport.OnCloseHander?
+    public var onReceive: Transport.OnReceiveHandler?
+    public var onClose: Transport.OnCloseHander?
     private let negotiateVersion = 1
 
     // MARK: - Initialization
@@ -338,7 +334,7 @@ class HttpConnection: IConnection, @unchecked Sendable {
             let transportOrError = await resolveTransportOrError(endpoint: endpoint, requestedTransport: requestedTransport, requestedTransferFormat: requestedTransferFormat, useStatefulReconnect: negotiate?.useStatefulReconnect ?? false)
             if let error = transportOrError as? Error {
                 transportExceptions.append(error)
-            } else if let transportInstance = transportOrError as? ITransport {
+            } else if let transportInstance = transportOrError as? Transport {
                 transport = transportInstance
                 if negotiate == nil {
                     negotiate = try await getNegotiationResponse(url: url)
@@ -477,11 +473,10 @@ class HttpConnection: IConnection, @unchecked Sendable {
         return urlComponents.url!.absoluteString
     }
 
-    private func constructTransport(transport: HttpTransportType) throws -> ITransport {
+    private func constructTransport(transport: HttpTransportType) throws -> Transport {
         switch transport {
             case .webSockets:
                 return WebSocketTransport(
-                    httpClient: httpClient,
                     accessTokenFactory: accessTokenFactory,
                     logger: logger,
                     logMessageContent: options.logMessageContent ?? false,
@@ -547,34 +542,3 @@ class HttpConnection: IConnection, @unchecked Sendable {
         return urlRequest
     }
 }
-
-// MARK: - Helper Classes and Enums
-
-class DefaultLogger: Logger, @unchecked Sendable {
-    func log(level: LogLevel, message: String) {
-        print("[\(level)] \(message)")
-    }
-}
-
-
-// MARK: - Notes on Translation
-
-// - **Async/Await Conversion**: The original TypeScript code uses Promises extensively. In Swift, the async/await pattern is used to handle asynchronous code. All asynchronous methods have been marked with `async` and `throws` where appropriate.
-
-// - **Error Handling**: TypeScript uses `throw` for exceptions and `Promise.reject`. In Swift, we use `throw` and handle errors using `do-catch` blocks.
-
-// - **Optionals and Nullability**: Swift uses optionals (`?`) to represent values that can be `nil`, similar to `undefined` or `null` in TypeScript.
-
-// - **Enums and OptionSets**: The `HttpTransportType` enum is represented as an `OptionSet` in Swift to allow for bitwise operations, matching the TypeScript implementation.
-
-// - **Closures and Delegates**: The `onReceive` and `onClose` callbacks are implemented as closures in Swift. Care was taken to manage retain cycles with `[weak self]` where necessary.
-
-// - **Type Conversions**: Some TypeScript-specific constructs (like `keyof typeof`) have been adapted to Swift equivalents, using enums and dictionaries.
-
-// - **Dependency Placeholders**: Since the full implementations of dependencies like `HttpClient`, `ILogger`, `ITransport`, etc., are not provided, placeholders and basic implementations have been used to focus on translating the `HttpConnection` logic.
-
-// - **Error Messages and Logging**: Error messages and logging have been translated to use Swift string interpolation and the `ILogger` protocol.
-
-// - **Maximum Redirects Constant**: The `MAX_REDIRECTS` constant is implemented directly in the `startInternal` method.
-
-// - **Difficult Parts**: Translating the bitwise operations and the `transportMatches` function required careful handling to match Swift's type system and conventions. Also, managing asynchronous callbacks and error propagation in Swift's async/await model required attention to ensure correctness.

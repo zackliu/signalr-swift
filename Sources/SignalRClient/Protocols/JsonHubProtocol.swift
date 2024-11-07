@@ -7,7 +7,6 @@ class JsonHubProtocol: HubProtocol {
 
     func parseMessages(input: StringOrData) throws -> [HubMessage] {
         let inputString: String
-        let v: HubInvocationMessage
         switch input {
             case .string(let str):
                 inputString = str
@@ -19,7 +18,7 @@ class JsonHubProtocol: HubProtocol {
             return []
         }
 
-        let messages = try TextMessageFormat.parse(input: inputString)
+        let messages = try TextMessageFormat.parse(inputString)
         var hubMessages = [HubMessage]()
 
         for message in messages {
@@ -71,6 +70,6 @@ class JsonHubProtocol: HubProtocol {
         guard let jsonString = String(data: jsonData, encoding: .utf8) else {
             throw NSError(domain: "JsonHubProtocol", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to convert JSON data to string."])
         }
-        return .string(TextMessageFormat.write(output: jsonString))
+        return .string(TextMessageFormat.write(jsonString))
     }
 }

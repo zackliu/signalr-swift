@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 
-final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegate, @unchecked Sendable {
+final class WebSocketTransport: NSObject, Transport, @unchecked Sendable {
     private let logger: Logger
     private let accessTokenFactory: (@Sendable() async throws -> String?)?
     private let logMessageContent: Bool
@@ -16,15 +16,16 @@ final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegat
     var onReceive: OnReceiveHandler?
     var onClose: OnCloseHander?
 
-    init(httpClient: HttpClient,
-         accessTokenFactory: (@Sendable () async throws -> String?)?,
+    init(accessTokenFactory: (@Sendable () async throws -> String?)?,
          logger: Logger,
          logMessageContent: Bool,
-         headers: [String: String]) {
+         headers: [String: String],
+         urlSession: URLSession? = nil) {
         self.accessTokenFactory = accessTokenFactory
         self.logger = logger
         self.logMessageContent = logMessageContent
         self.headers = headers
+        self.urlSession = urlSession ?? URLSession.shared
     }
 
     func connect(url: String, transferFormat: TransferFormat) async throws {
@@ -40,16 +41,26 @@ final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegat
             urlComponents.scheme = "wss"
         }
 
-        let urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: OperationQueue()) 
         var request = URLRequest(url: urlComponents.url!)
-        let websocket = urlSession.webSocketTask(with: request)
+
+        // Add token to query
+        if accessTokenFactory != nil {
+            let token = try await accessTokenFactory!()
+            urlComponents.queryItems = [URLQueryItem(name: "access_token", value: token)]
+        }
+
+        // Add headeres
+        for (key, value) in headers {
+            request.addValue(value, forHTTPHeaderField: key)
+        }
+
+        let websocket = urlSession!.webSocketTask(with: request)
 
         websocket.resume()
 
         Task {
             await receiveMessage()
         }
-        
     }
 
     func send(_ data: StringOrData) async throws {
@@ -64,10 +75,6 @@ final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegat
                 try await ws.send(URLSessionWebSocketTask.Message.string(str))
             case .data(let data):
                 try await ws.send(URLSessionWebSocketTask.Message.data(data))
-            default:
-                throw NSError(domain: "WebSocketTransport",
-                              code: -1,
-                              userInfo: [NSLocalizedDescriptionKey: "Invalid data type"]) 
         }
     }
 
@@ -75,14 +82,6 @@ final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegat
         websocket?.cancel()
         urlSession?.finishTasksAndInvalidate()
         await onClose?(nil)
-    }
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        self.logger.log(level: .debug, message: "WebSocket closed.")
-    }
-
-    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        self.logger.log(level: .debug, message: "WebSocket opened.")
     }
 
     private func receiveMessage() async {
@@ -100,12 +99,8 @@ final class WebSocketTransport: NSObject, ITransport, URLSessionWebSocketDelegat
                 }
             }
         } catch {
-            print("Failed to receive message: \(error)")
-            // You might want to handle reconnection logic here if needed
+            logger.log(level: .error, message: "Failed to receive message: \(error)")
+            websocket.cancel(with: .invalid, reason: nil)
         }
-    }
-
-    public func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completionHandler(.performDefaultHandling, nil)
     }
 }
