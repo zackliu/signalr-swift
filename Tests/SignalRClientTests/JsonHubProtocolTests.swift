@@ -168,18 +168,108 @@ final class JsonHubProtocolTests: XCTestCase {
     }
 
     func testWriteInvocationMessage() throws {
-        let message = InvocationMessage(target: "testTarget", arguments: [AnyCodable("arg1"), AnyCodable(123)], streamIds: ["456"], headers: ["key1": "value1", "key2": "value2"], invocationId: "123")
+        let message = InvocationMessage(
+            target: "testTarget",
+            arguments: [AnyCodable("arg1"), AnyCodable(123)],
+            streamIds: ["456"],
+            headers: ["key1": "value1", "key2": "value2"],
+            invocationId: "123"
+        )
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"streamIds":["456"],"type":1,"headers":{"key2":"value2","key1":"value1"},"target":"testTarget","arguments":["arg1",123],"invocationId":"123"}
+        """)
+    }
+
+    func testWriteStreamItemMessage() throws {
+        let message = StreamItemMessage(invocationId: "123", item: AnyCodable("someData"), headers: ["key1": "value1", "key2": "value2"])
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":2,"item":"someData","invocationId":"123","headers":{"key2":"value2","key1":"value1"}}
+        """)
+    }
+
+    func testWriteCompletionMessage() throws {
+        let message = CompletionMessage(
+            invocationId: "123",
+            error: nil,
+            result: AnyCodable("completionResult"),
+            headers: ["key1": "value1", "key2": "value2"]
+        )
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":3,"invocationId":"123","result":"completionResult","headers":{"key2":"value2","key1":"value1"}}
+        """)
+    }
+
+    func testWriteStreamInvocationMessage() throws {
+        let message = StreamInvocationMessage(
+            invocationId: "streamId123",
+            target: "streamTarget",
+            arguments: [AnyCodable("arg1"), AnyCodable(456)],
+            streamIds: ["123"],
+            headers: ["key1": "value1", "key2": "value2"]
+        )
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":4,"target":"streamTarget","arguments":["arg1",456],"invocationId":"streamId123","streamIds":["123"],"headers":{"key2":"value2","key1":"value1"}}
+        """)
+    }
+
+    func testWriteCancelInvocationMessage() throws {
+        let message = CancelInvocationMessage(invocationId: "cancel123",headers: ["key1": "value1", "key2": "value2"])
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":5,"invocationId":"cancel123","headers":{"key2":"value2","key1":"value1"}}
+        """)
+    }
+
+    func testWritePingMessage() throws {
+        let message = PingMessage()
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":6}
+        """)
+    }
+
+    func testWriteCloseMessage() throws {
+        let message = CloseMessage(error: "Connection closed", allowReconnect: true)
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":7,"error":"Connection closed","allowReconnect":true}
+        """)
+    }
+
+    func testWriteAckMessage() throws {
+        let message = AckMessage(sequenceId: 123)
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":8,"sequenceId":123}
+        """)
+    }
+
+    func testWriteSequenceMessage() throws {
+        let message = SequenceMessage(sequenceId: 1001)
+        
+        try verifyWriteMessage(message: message, expectedJson: """
+        {"type":9,"sequenceId":1001}
+        """)
+    }
+    
+    // Helper function to verify JSON serialization of messages
+    private func verifyWriteMessage(message: HubMessage, expectedJson: String) throws {
         let output = try jsonHubProtocol.writeMessage(message: message)
         
-        if case let .string(outputString) = output {
-            // XCTAssertEqual("{\"type\": 1, \"target\": \"testTarget\", \"arguments\": [\"arg1\", 123], \"streamIds\": [\"456\"], \"headers\":{\"key1\":\"value1\",\"key2\":\"value2\"}, \"invocationId\":\"123\"}\(TextMessageFormat.recordSeparator)", outputString)
-            XCTAssertEqual("""
-            {"streamIds":["456"],"type":1,"headers":{"key2":"value2","key1":"value1"},"target":"testTarget","arguments":["arg1",123],"invocationId":"123"}
-            """, outputString)
+        if case var .string(outputString) = output {
+            outputString = String(outputString.dropLast())  // Remove last 0x1E character if present
+            
+            // Convert output and expected JSON strings to dictionaries for comparison
+            let outputJson = try JSONSerialization.jsonObject(with: outputString.data(using: .utf8)!) as! NSDictionary
+            let expectedJsonObject = try JSONSerialization.jsonObject(with: expectedJson.data(using: .utf8)!) as! NSDictionary
+            
+            XCTAssertEqual(outputJson, expectedJsonObject, "The JSON output does not match the expected JSON structure for \(message)")
         } else {
             XCTFail("Expected output to be a string")
         }
     }
-    
-    // Additional tests for other message types, e.g., StreamInvocationMessage, CancelInvocationMessage, etc.
 }
